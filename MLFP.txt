@@ -1,0 +1,402 @@
+!git config --global user.name "beylo30"
+!git config --global user.email "nabil.nours30@gmail.com"
+
+
+!git clone https://github.com/beylo30/2023320301
+
+%cd 2023320301
+
+%cd /root/2023320301
+!ls
+!git status
+
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+
+
+!find /content/drive/MyDrive -maxdepth 5 -name "*.ipynb"
+
+
+%cd /content
+
+!cp "/content/drive/MyDrive/MLFP.ipynb" .
+
+
+%cd /content
+
+!git add .
+!git commit -m "Add files"
+!git push
+
+
+# Imports + Reproducibility
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, regularizers
+
+from tensorflow.keras.datasets import cifar10
+
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.svm import LinearSVC
+from sklearn.decomposition import PCA
+
+# Optional (nice 3D plot). If not available, we'll fallback to matplotlib 3D.
+try:
+    import plotly.express as px
+    PLOTLY_AVAILABLE = True
+except Exception:
+    PLOTLY_AVAILABLE = False
+
+# Reproducibility (best effort)
+tf.keras.utils.set_random_seed(42)
+np.random.seed(42)
+
+print("TensorFlow:", tf.__version__)
+print("GPU available:", len(tf.config.list_physical_devices('GPU')) > 0)
+
+
+# =========================
+# Load CIFAR-10 properly
+# =========================
+(X_train_full, y_train_full), (X_test, y_test) = cifar10.load_data()
+
+classes = ['Airplane', 'Automobile', 'Bird', 'Cat', 'Deer', 'Dog', 'Frog', 'Horse', 'Ship', 'Truck']
+num_classes = 10
+
+y_train_full = y_train_full.reshape(-1,)
+y_test = y_test.reshape(-1,)
+
+print("\nOfficial CIFAR-10 split:")
+print("Train:", X_train_full.shape, y_train_full.shape)
+print("Test :", X_test.shape, y_test.shape)
+
+# Create a VALIDATION set from the official training set
+X_train, X_val, y_train, y_val = train_test_split(
+    X_train_full, y_train_full,
+    test_size=0.2,
+    random_state=42,
+    stratify=y_train_full
+)
+
+# Normalize
+X_train = X_train.astype("float32") / 255.0
+X_val   = X_val.astype("float32") / 255.0
+X_test  = X_test.astype("float32") / 255.0
+
+print("\nAfter train/val split:")
+print("Train:", X_train.shape, y_train.shape)
+print("Val  :", X_val.shape, y_val.shape)
+print("Test :", X_test.shape, y_test.shape)
+
+# =========================
+# Utility: plot sample
+# =========================
+def plot_sample(X, y, index):
+    plt.figure(figsize=(3,3))
+    plt.imshow(X[index])
+    plt.title(classes[int(y[index])])
+    plt.axis('off')
+    plt.show()
+
+plot_sample(X_train, y_train, 56)
+
+
+# =========================
+# tf.data pipelines (fast)
+# =========================
+BATCH_SIZE = 128
+AUTOTUNE = tf.data.AUTOTUNE
+
+train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+train_ds = train_ds.shuffle(20000, seed=42, reshuffle_each_iteration=True).batch(BATCH_SIZE).prefetch(AUTOTUNE)
+
+val_ds = tf.data.Dataset.from_tensor_slices((X_val, y_val)).batch(BATCH_SIZE).prefetch(AUTOTUNE)
+test_ds = tf.data.Dataset.from_tensor_slices((X_test, y_test)).batch(BATCH_SIZE).prefetch(AUTOTUNE)
+
+# =========================
+# Data Augmentation (inside model)
+# =========================
+data_augmentation = keras.Sequential(
+    [
+        layers.RandomFlip("horizontal"),
+        layers.RandomTranslation(0.1, 0.1),
+        layers.RandomRotation(0.05),
+        layers.RandomZoom(0.1),
+    ],
+    name="data_augmentation"
+)
+
+
+# =========================
+# Better CNN: small ResNet-style (strong for CIFAR-10)
+# =========================
+weight_decay = 1e-4
+l2 = regularizers.l2(weight_decay)
+
+def conv_bn_lrelu(x, filters, k=3, s=1):
+    x = layers.Conv2D(filters, k, strides=s, padding="same",
+                      use_bias=False, kernel_regularizer=l2)(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.LeakyReLU(0.1)(x)
+    return x
+
+def residual_block(x, filters, downsample=False):
+    stride = 2 if downsample else 1
+    shortcut = x
+
+    x = conv_bn_lrelu(x, filters, k=3, s=stride)
+    x = layers.Conv2D(filters, 3, strides=1, padding="same",
+                      use_bias=False, kernel_regularizer=l2)(x)
+    x = layers.BatchNormalization()(x)
+
+    # Match dimensions for residual add
+    if downsample or shortcut.shape[-1] != filters:
+        shortcut = layers.Conv2D(filters, 1, strides=stride, padding="same",
+                                 use_bias=False, kernel_regularizer=l2)(shortcut)
+        shortcut = layers.BatchNormalization()(shortcut)
+
+    x = layers.Add()([x, shortcut])
+    x = layers.LeakyReLU(0.1)(x)
+    return x
+
+inputs = keras.Input(shape=(32, 32, 3))
+x = data_augmentation(inputs)
+
+# Stem
+x = conv_bn_lrelu(x, 32)
+x = conv_bn_lrelu(x, 32)
+
+# Stages
+x = residual_block(x, 32)
+x = residual_block(x, 32)
+
+x = residual_block(x, 64, downsample=True)
+x = residual_block(x, 64)
+
+x = residual_block(x, 128, downsample=True)
+x = residual_block(x, 128)
+
+x = residual_block(x, 256, downsample=True)
+x = residual_block(x, 256)
+
+x = layers.GlobalAveragePooling2D(name="features")(x)
+x = layers.Dropout(0.3)(x)
+logits = layers.Dense(num_classes, name="logits")(x)
+
+model = keras.Model(inputs, logits, name="CIFAR10_ResNetSmall")
+
+# Optimizer (AdamW if available, else Adam)
+try:
+    optimizer = keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=weight_decay)
+except Exception:
+    optimizer = keras.optimizers.Adam(learning_rate=1e-3)
+
+model.compile(
+    optimizer=optimizer,
+    loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+    metrics=["accuracy"]
+)
+
+model.summary()
+
+
+# =========================
+# Callbacks (make training "best")
+# =========================
+callbacks = [
+    keras.callbacks.ModelCheckpoint("best_cifar10_model.keras", monitor="val_accuracy",
+                                    save_best_only=True, verbose=1),
+    keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3, min_lr=1e-6, verbose=1),
+    keras.callbacks.EarlyStopping(monitor="val_accuracy", patience=10, restore_best_weights=True, verbose=1),
+]
+
+EPOCHS = 10  # EarlyStopping will likely stop earlier if it converges
+
+history = model.fit(
+    train_ds,
+    validation_data=val_ds,
+    epochs=EPOCHS,
+    callbacks=callbacks
+)
+
+
+# =========================
+# Evaluate on official TEST set
+# =========================
+test_loss, test_acc = model.evaluate(test_ds, verbose=0)
+print("\nOfficial TEST accuracy:", test_acc)
+
+# =========================
+# Training curves (train + val)
+# =========================
+hist = history.history
+epochs_r = range(1, len(hist["accuracy"]) + 1)
+
+plt.figure(figsize=(10,4))
+
+plt.subplot(1,2,1)
+plt.plot(epochs_r, hist["accuracy"], label="Train Acc")
+plt.plot(epochs_r, hist["val_accuracy"], label="Val Acc")
+plt.title("Accuracy")
+plt.legend()
+
+plt.subplot(1,2,2)
+plt.plot(epochs_r, hist["loss"], label="Train Loss")
+plt.plot(epochs_r, hist["val_loss"], label="Val Loss")
+plt.title("Loss")
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+
+# =========================
+# Classification report + confusion matrix (TEST)
+# =========================
+y_pred_logits = model.predict(test_ds, verbose=0)
+y_pred = np.argmax(y_pred_logits, axis=1)
+
+print("\nClassification Report (TEST):")
+print(classification_report(y_test, y_pred, target_names=classes))
+
+cm = confusion_matrix(y_test, y_pred)
+
+def plot_confusion_matrix(cm, class_names):
+    plt.figure(figsize=(8,6))
+    plt.imshow(cm)
+    plt.title("Confusion Matrix (TEST)")
+    plt.colorbar()
+    tick_marks = np.arange(len(class_names))
+    plt.xticks(tick_marks, class_names, rotation=45, ha="right")
+    plt.yticks(tick_marks, class_names)
+
+    thresh = cm.max() * 0.6
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            plt.text(j, i, cm[i, j],
+                     horizontalalignment="center",
+                     color="white" if cm[i, j] > thresh else "black",
+                     fontsize=8)
+
+    plt.ylabel("True label")
+    plt.xlabel("Predicted label")
+    plt.tight_layout()
+    plt.show()
+
+plot_confusion_matrix(cm, classes)
+
+
+# =========================
+# SVM baseline (BEST way): SVM on CNN features
+# =========================
+feature_extractor = keras.Model(model.input, model.get_layer("features").output)
+
+# Extract features in batches for speed
+train_features = feature_extractor.predict(train_ds, verbose=0)
+val_features   = feature_extractor.predict(val_ds, verbose=0)
+test_features  = feature_extractor.predict(test_ds, verbose=0)
+
+# Train SVM on (train + val) features for a fair final comparison
+X_svm_train = np.concatenate([train_features, val_features], axis=0)
+y_svm_train = np.concatenate([y_train, y_val], axis=0)
+
+svm_pipe = Pipeline([
+    ("scaler", StandardScaler()),
+    ("svm", LinearSVC(dual=False, max_iter=5000))
+])
+
+param_grid = {
+    "svm__C": [0.1, 1, 3, 10]
+}
+
+grid = GridSearchCV(svm_pipe, param_grid, cv=3, n_jobs=-1, verbose=1)
+grid.fit(X_svm_train, y_svm_train)
+
+print("\nBest SVM params:", grid.best_params_)
+svm_best = grid.best_estimator_
+svm_test_acc = svm_best.score(test_features, y_test)
+print("SVM TEST accuracy (on CNN features):", svm_test_acc)
+
+
+# =========================
+# 3D Visualization (PCA on CNN features)
+# =========================
+# Use a subset so plotting is fast
+N = 6000
+idx = np.random.RandomState(42).choice(len(X_svm_train), size=min(N, len(X_svm_train)), replace=False)
+feat_subset = X_svm_train[idx]
+y_subset = y_svm_train[idx]
+
+pca = PCA(n_components=3, random_state=42)
+feat_3d = pca.fit_transform(feat_subset)
+
+if PLOTLY_AVAILABLE:
+    fig = px.scatter_3d(
+        x=feat_3d[:,0], y=feat_3d[:,1], z=feat_3d[:,2],
+        color=y_subset.astype(str),
+        title="3D PCA of CNN Features (CIFAR-10)",
+        labels={"color": "Class"}
+    )
+    fig.show()
+else:
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    fig = plt.figure(figsize=(8,6))
+    ax = fig.add_subplot(111, projection="3d")
+    ax.scatter(feat_3d[:,0], feat_3d[:,1], feat_3d[:,2], c=y_subset, s=5)
+    ax.set_title("3D PCA of CNN Features (CIFAR-10)")
+    plt.show()
+
+
+# =========================
+# Compare original vs augmented image
+# =========================
+index = 56
+original_image = X_train[index]
+augmented_image = data_augmentation(tf.expand_dims(original_image, 0), training=True)[0].numpy()
+
+plt.figure(figsize=(8,4))
+plt.subplot(1,2,1)
+plt.imshow(original_image)
+plt.title("Original")
+plt.axis("off")
+
+plt.subplot(1,2,2)
+plt.imshow(augmented_image)
+plt.title("Augmented")
+plt.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# =========================
+# Predict on external image (fixed preprocessing)
+# =========================
+random_url = "https://www.lamborghini.com/sites/it-en/files/DAM/lamborghini/facelift_2019/homepage/families-gallery/2023/revuelto/revuelto_m.png"
+
+local_path = tf.keras.utils.get_file("external_img.png", origin=random_url)
+img = keras.utils.load_img(local_path, target_size=(32, 32))
+img_array = keras.utils.img_to_array(img).astype("float32") / 255.0
+img_array = tf.expand_dims(img_array, 0)
+
+pred = model.predict(img_array, verbose=0)
+probs = tf.nn.softmax(pred[0]).numpy()
+
+top = np.argmax(probs)
+print(f"\nExternal image prediction: {classes[top]} ({probs[top]*100:.2f}%)")
+
+plt.figure(figsize=(3,3))
+plt.imshow(img)
+plt.title(f"Pred: {classes[top]} ({probs[top]*100:.1f}%)")
+plt.axis("off")
+plt.show()
+
