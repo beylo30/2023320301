@@ -1,0 +1,31 @@
+# Imports + Reproducibility
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers, regularizers
+
+from tensorflow.keras.datasets import cifar10
+
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.svm import LinearSVC
+from sklearn.decomposition import PCA
+
+# Optional (nice 3D plot). If not available, we'll fallback to matplotlib 3D.
+try:
+    import plotly.express as px
+    PLOTLY_AVAILABLE = True
+except Exception:
+    PLOTLY_AVAILABLE = False
+
+# Reproducibility (best effort)
+tf.keras.utils.set_random_seed(42)
+np.random.seed(42)
+
+print("TensorFlow:", tf.__version__)
+print("GPU available:", len(tf.config.list_physical_devices('GPU')) > 0)
